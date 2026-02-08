@@ -1,0 +1,37 @@
+# Score Visualizer Configuration
+
+[paths]
+# Directory paths relative to the score_visualizer directory
+input_dir = "../tools/in"
+output_dir = "../tools/results"
+visualizer_dir = "../tools/results/visualizations"
+html_output = "../tools/results/index.html"
+
+[tester]
+# Complete command to run the solution
+# Use {{script}} as placeholder for the script/binary path
+# Optional script/binary path used for {{script}}
+# script = "../A.go"
+
+# Go
+# command = "go run {{script}}"
+
+# Python
+# command = "python {{script}}"
+
+# C++
+# command = "g++ -o /tmp/a {{script}} && /tmp/a"
+
+# Rust (source code with external crates)
+# Requires Cargo.toml in the script directory
+# command = "cargo run --release --manifest-path {{script}}/Cargo.toml"
+
+# Rust (compiled binary)
+# command = "{{script}}"
+
+# Node.js
+# command = "node {{script}}"
+
+# Default: Rust
+command = "cargo run --release --manifest-path {{script}}/Cargo.toml"
+script = "/path/to/your/rust/project"
