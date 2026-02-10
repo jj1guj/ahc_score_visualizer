@@ -1,6 +1,7 @@
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
 use serde::Deserialize;
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -20,6 +21,13 @@ struct Result {
 struct Config {
     paths: PathsConfig,
     tester: TesterConfig,
+    #[serde(default)]
+    parallel: Option<ParallelConfig>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ParallelConfig {
+    num_threads: Option<usize>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -34,11 +42,36 @@ struct PathsConfig {
 struct TesterConfig {
     command: String,
     script: Option<String>,
+    solver_script: Option<String>,
 }
 
 fn main() {
+    // Parse command line arguments for --config option
+    let args: Vec<String> = env::args().collect();
+    let config_path = {
+        let mut path = "./config.toml".to_string();
+        let mut i = 1;
+        while i < args.len() {
+            if args[i] == "--config" {
+                if i + 1 < args.len() {
+                    path = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("Error: --config requires a path argument");
+                    return;
+                }
+            } else if args[i].starts_with("--config=") {
+                path = args[i]["--config=".len()..].to_string();
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
+        path
+    };
+
     // Load configuration
-    let config = match load_config("./config.toml") {
+    let config = match load_config(&config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("Error loading config: {}", e);
@@ -100,17 +133,32 @@ fn main() {
     let config_for_thread = config.clone();
 
     let producer = thread::spawn(move || {
-        input_files_for_thread
-            .par_iter()
-            .for_each_with(tx, |sender, input_file| {
-                let result = process_file(
-                    input_file,
-                    &output_dir_for_thread,
-                    &config_for_thread,
-                    &tools_dir_for_thread,
-                );
-                let _ = sender.send(result);
+        let num_threads = config_for_thread
+            .parallel
+            .as_ref()
+            .and_then(|p| p.num_threads)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
             });
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            input_files_for_thread
+                .par_iter()
+                .for_each_with(tx, |sender, input_file| {
+                    let result = process_file(
+                        input_file,
+                        &output_dir_for_thread,
+                        &config_for_thread,
+                        &tools_dir_for_thread,
+                    );
+                    let _ = sender.send(result);
+                });
+        });
     });
 
     let mut results: Vec<Result> = Vec::with_capacity(total_inputs as usize);
@@ -166,7 +214,7 @@ fn format_score(score: usize) -> String {
     format!("{}", score)
 }
 
-fn process_file(input_file: &str, output_dir: &str, config: &Config, tools_dir: &Path) -> Result {
+fn process_file(input_file: &str, output_dir: &str, config: &Config, _tools_dir: &Path) -> Result {
     let base_name = Path::new(input_file)
         .file_name()
         .unwrap()
@@ -193,6 +241,9 @@ fn process_file(input_file: &str, output_dir: &str, config: &Config, tools_dir: 
     if let Some(script) = config.tester.script.as_deref() {
         command = command.replace("{{script}}", script);
     }
+    if let Some(solver_script) = config.tester.solver_script.as_deref() {
+        command = command.replace("{{solver_script}}", solver_script);
+    }
     let parts: Vec<&str> = command.split_whitespace().collect();
 
     if parts.is_empty() {
@@ -204,10 +255,8 @@ fn process_file(input_file: &str, output_dir: &str, config: &Config, tools_dir: 
         };
     }
 
-    let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "-r", "--bin", "tester"])
-        .args(&parts)
-        .current_dir(tools_dir)
+    let mut cmd = Command::new(parts[0]);
+    cmd.args(&parts[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -250,6 +299,14 @@ fn process_file(input_file: &str, output_dir: &str, config: &Config, tools_dir: 
     // Parse score from stderr
     let mut score = 0;
     let stderr_string = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        eprintln!(
+            "[WARN] Tester failed for {}: exit code {:?}",
+            input_file,
+            output.status.code()
+        );
+        eprintln!("[WARN] stderr: {}", stderr_string);
+    }
     for line in stderr_string.lines() {
         if line.starts_with("Score = ") {
             let score_str = line.trim_start_matches("Score = ");
@@ -269,7 +326,7 @@ fn visualize_result(
     mut result: Result,
     output_dir: &str,
     visualizer_dir: &str,
-    tools_dir: &Path,
+    _tools_dir: &Path,
 ) -> Result {
     let base_name = Path::new(&result.input_file)
         .file_name()
@@ -277,19 +334,30 @@ fn visualize_result(
         .to_string_lossy();
     let visualizer_file = format!("{}/{}", visualizer_dir, base_name.replace(".txt", ".html"));
 
-    let output = Command::new("cargo")
-        .args(&["run", "-r", "--bin", "vis"])
+    let output = Command::new("./target/release/vis")
         .arg(&result.input_file)
         .arg(format!("{}/{}", output_dir, base_name))
-        .current_dir(tools_dir)
         .output();
 
-    if let Ok(_) = output {
-        let vis_html = tools_dir.join("vis.html");
+    if let Ok(out) = output {
+        if !out.status.success() {
+            eprintln!(
+                "Error running visualizer for {}: {}",
+                base_name,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return result;
+        }
+        // vis writes vis.html in the current directory
+        let vis_html = Path::new("vis.html");
         if vis_html.exists() {
-            if let Err(e) = fs::copy(&vis_html, &visualizer_file) {
-                eprintln!("Error copying vis.html: {}", e);
-                return result;
+            if let Err(_e) = fs::rename(&vis_html, &visualizer_file) {
+                // rename may fail across filesystems, fall back to copy+remove
+                if let Err(e) = fs::copy(&vis_html, &visualizer_file) {
+                    eprintln!("Error copying vis.html: {}", e);
+                    return result;
+                }
+                let _ = fs::remove_file(&vis_html);
             }
             result.visualizer = format!("visualizations/{}", base_name.replace(".txt", ".html"));
         } else {
