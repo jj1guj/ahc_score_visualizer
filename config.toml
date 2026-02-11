@@ -6,6 +6,7 @@ input_dir = "../tools/in"
 output_dir = "../tools/results"
 visualizer_dir = "../tools/results/visualizations"
 html_output = "../tools/results/index.html"
+answers_dir = "../tools/results/answers"
 
 [tester]
 # Complete command to run the solution

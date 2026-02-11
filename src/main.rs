@@ -36,6 +36,8 @@ struct PathsConfig {
     output_dir: String,
     visualizer_dir: String,
     html_output: String,
+    #[serde(default)]
+    answers_dir: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -184,6 +186,28 @@ fn main() {
 
     // Generate HTML
     generate_html(&results, total_score, &timestamp, html_output);
+
+    // Copy solver output files to answers directory
+    if let Some(answers_dir) = &config.paths.answers_dir {
+        fs::create_dir_all(answers_dir).ok();
+        match fs::read_dir(output_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let src = entry.path();
+                        if src.is_file() {
+                            let dest = Path::new(answers_dir).join(entry.file_name());
+                            if let Err(e) = fs::copy(&src, &dest) {
+                                eprintln!("Error copying {}: {}", src.display(), e);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("Error reading output dir: {}", e),
+        }
+        eprintln!("Answers saved to {}", answers_dir);
+    }
 
     println!("Total Score: {}", total_score);
     println!("Results saved to {}", html_output);
