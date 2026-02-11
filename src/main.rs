@@ -185,6 +185,7 @@ fn main() {
     // Generate HTML
     generate_html(&results, total_score, &timestamp, html_output);
 
+    println!("Total Score: {}", total_score);
     println!("Results saved to {}", html_output);
 }
 
