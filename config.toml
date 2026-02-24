@@ -36,3 +36,26 @@ answers_dir = "../tools/results/answers"
 # Default: Rust
 command = "cargo run --release --manifest-path {{script}}/Cargo.toml"
 script = "/path/to/your/rust/project"
+
+# [scorer]
+# Optional: Use a separate scoring command instead of parsing score from solver's stderr.
+# When configured, the score is obtained from this command's stdout instead of the solver's stderr.
+# Use {{input}} for the input file path and {{output}} for the output file path.
+# The command's stdout should contain the score (either as "Score = X" or just a number).
+#
+# Example for AHC tools (cargo run -r --bin score):
+# command = "cargo run -r --bin score {{input}} {{output}}"
+# working_dir = "../tools"
+#
+# Example for precompiled binary:
+# command = "./score.exe {{input}} {{output}}"
+# working_dir = "../tools"
+
+# [visualizer]
+# Optional: Configure the visualizer command.
+# Set enabled = false to disable visualization entirely.
+# Use {{input}} for the input file path and {{output}} for the output file path.
+#
+# enabled = true
+# command = "cargo run -r --bin vis {{input}} {{output}}"
+# working_dir = "../tools"

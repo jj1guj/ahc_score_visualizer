@@ -23,6 +23,10 @@ struct Config {
     tester: TesterConfig,
     #[serde(default)]
     parallel: Option<ParallelConfig>,
+    #[serde(default)]
+    scorer: Option<ScorerConfig>,
+    #[serde(default)]
+    visualizer: Option<VisualizerConfig>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -45,6 +49,24 @@ struct TesterConfig {
     command: String,
     script: Option<String>,
     solver_script: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ScorerConfig {
+    command: String,
+    working_dir: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct VisualizerConfig {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    command: Option<String>,
+    working_dir: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn main() {
@@ -166,7 +188,7 @@ fn main() {
     let mut results: Vec<Result> = Vec::with_capacity(total_inputs as usize);
     for result in rx {
         score_bar.inc(1);
-        let result = visualize_result(result, output_dir, visualizer_dir, &tools_dir);
+        let result = visualize_result(result, output_dir, visualizer_dir, &tools_dir, &config);
         vis_bar.inc(1);
         results.push(result);
     }
@@ -237,6 +259,70 @@ fn extract_number(filename: &str) -> usize {
 
 fn format_score(score: usize) -> String {
     format!("{}", score)
+}
+
+fn parse_score_from_output(output: &str) -> usize {
+    for line in output.lines() {
+        let line = line.trim();
+        // Try "Score = X" format
+        if let Some(score_str) = line.strip_prefix("Score = ") {
+            if let Ok(score) = score_str.trim().parse::<usize>() {
+                return score;
+            }
+        }
+        // Try just a number
+        if let Ok(score) = line.parse::<usize>() {
+            return score;
+        }
+    }
+    0
+}
+
+fn run_scorer(input_file: &str, output_file: &str, scorer_config: &ScorerConfig) -> usize {
+    // Convert to absolute paths so the command works regardless of working directory
+    let abs_input =
+        fs::canonicalize(input_file).unwrap_or_else(|_| Path::new(input_file).to_path_buf());
+    let abs_output =
+        fs::canonicalize(output_file).unwrap_or_else(|_| Path::new(output_file).to_path_buf());
+
+    let command = scorer_config
+        .command
+        .replace("{{input}}", &abs_input.to_string_lossy())
+        .replace("{{output}}", &abs_output.to_string_lossy());
+
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.is_empty() {
+        return 0;
+    }
+
+    let mut cmd = Command::new(parts[0]);
+    cmd.args(&parts[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Some(ref dir) = scorer_config.working_dir {
+        cmd.current_dir(dir);
+    }
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("Error running scorer: {}", e);
+            return 0;
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "Scorer failed for {} {}: {}",
+            input_file, output_file, stderr
+        );
+        return 0;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_score_from_output(&stdout)
 }
 
 fn process_file(input_file: &str, output_dir: &str, config: &Config, _tools_dir: &Path) -> Result {
@@ -321,23 +407,37 @@ fn process_file(input_file: &str, output_dir: &str, config: &Config, _tools_dir:
     // Save stdout to file
     let _ = fs::write(&output_file, &output.stdout);
 
-    // Parse score from stderr
-    let mut score = 0;
-    let stderr_string = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        eprintln!(
-            "[WARN] Tester failed for {}: exit code {:?}",
-            input_file,
-            output.status.code()
-        );
-        eprintln!("[WARN] stderr: {}", stderr_string);
-    }
-    for line in stderr_string.lines() {
-        if line.starts_with("Score = ") {
-            let score_str = line.trim_start_matches("Score = ");
-            score = score_str.parse::<usize>().unwrap_or(0);
+    // Get score: use separate scorer if configured, otherwise parse from stderr
+    let score = if let Some(ref scorer) = config.scorer {
+        let stderr_string = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            eprintln!(
+                "[WARN] Tester failed for {}: exit code {:?}",
+                input_file,
+                output.status.code()
+            );
+            eprintln!("[WARN] stderr: {}", stderr_string);
         }
-    }
+        run_scorer(input_file, &output_file, scorer)
+    } else {
+        let mut score = 0;
+        let stderr_string = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            eprintln!(
+                "[WARN] Tester failed for {}: exit code {:?}",
+                input_file,
+                output.status.code()
+            );
+            eprintln!("[WARN] stderr: {}", stderr_string);
+        }
+        for line in stderr_string.lines() {
+            if line.starts_with("Score = ") {
+                let score_str = line.trim_start_matches("Score = ");
+                score = score_str.parse::<usize>().unwrap_or(0);
+            }
+        }
+        score
+    };
 
     Result {
         input_file: input_file.to_string(),
@@ -352,17 +452,57 @@ fn visualize_result(
     output_dir: &str,
     visualizer_dir: &str,
     _tools_dir: &Path,
+    config: &Config,
 ) -> Result {
+    // Check if visualizer is disabled
+    if let Some(ref vis_config) = config.visualizer {
+        if !vis_config.enabled {
+            return result;
+        }
+    }
+
     let base_name = Path::new(&result.input_file)
         .file_name()
         .unwrap()
         .to_string_lossy();
     let visualizer_file = format!("{}/{}", visualizer_dir, base_name.replace(".txt", ".html"));
 
-    let output = Command::new("./target/release/vis")
-        .arg(&result.input_file)
-        .arg(format!("{}/{}", output_dir, base_name))
-        .output();
+    let abs_input = fs::canonicalize(&result.input_file)
+        .unwrap_or_else(|_| Path::new(&result.input_file).to_path_buf());
+    let output_path = format!("{}/{}", output_dir, base_name);
+    let abs_output =
+        fs::canonicalize(&output_path).unwrap_or_else(|_| Path::new(&output_path).to_path_buf());
+
+    let output = if let Some(ref vis_config) = config.visualizer {
+        if let Some(ref cmd_template) = vis_config.command {
+            // Use configured visualizer command
+            let command = cmd_template
+                .replace("{{input}}", &abs_input.to_string_lossy())
+                .replace("{{output}}", &abs_output.to_string_lossy());
+            let parts: Vec<&str> = command.split_whitespace().collect();
+            if parts.is_empty() {
+                return result;
+            }
+            let mut cmd = Command::new(parts[0]);
+            cmd.args(&parts[1..]);
+            if let Some(ref dir) = vis_config.working_dir {
+                cmd.current_dir(dir);
+            }
+            cmd.output()
+        } else {
+            // Default visualizer
+            Command::new("./target/release/vis")
+                .arg(&result.input_file)
+                .arg(&output_path)
+                .output()
+        }
+    } else {
+        // No visualizer config, use default
+        Command::new("./target/release/vis")
+            .arg(&result.input_file)
+            .arg(&output_path)
+            .output()
+    };
 
     if let Ok(out) = output {
         if !out.status.success() {
@@ -386,10 +526,19 @@ fn visualize_result(
             }
             result.visualizer = format!("visualizations/{}", base_name.replace(".txt", ".html"));
         } else {
-            eprintln!("vis.html not found");
+            // Check if the visualizer wrote stdout as HTML instead
+            let stdout_str = String::from_utf8_lossy(&out.stdout);
+            if !stdout_str.is_empty() {
+                if let Err(e) = fs::write(&visualizer_file, stdout_str.as_bytes()) {
+                    eprintln!("Error writing visualizer output: {}", e);
+                    return result;
+                }
+                result.visualizer =
+                    format!("visualizations/{}", base_name.replace(".txt", ".html"));
+            }
         }
     } else {
-        eprintln!("Error running visualizer");
+        // Visualizer binary not found or failed to start - skip silently
     }
 
     result
