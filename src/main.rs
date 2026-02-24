@@ -140,16 +140,22 @@ fn main() {
         .progress_chars("=>-"),
     );
     score_bar.set_message("Scoring");
-    let vis_bar = ProgressBar::new(total_inputs);
-    vis_bar.set_draw_target(ProgressDrawTarget::stderr());
-    vis_bar.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} {msg:<12} {bar:40.green/blue} {pos:>3}/{len:<3} {percent:>3}% | {per_sec} | ETA {eta}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-    vis_bar.set_message("Visualizing");
+    let vis_enabled = config.visualizer.as_ref().map_or(true, |v| v.enabled);
+    let vis_bar = if vis_enabled {
+        let bar = ProgressBar::new(total_inputs);
+        bar.set_draw_target(ProgressDrawTarget::stderr());
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} {msg:<12} {bar:40.green/blue} {pos:>3}/{len:<3} {percent:>3}% | {per_sec} | ETA {eta}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        bar.set_message("Visualizing");
+        Some(bar)
+    } else {
+        None
+    };
     let (tx, rx) = mpsc::channel::<Result>();
     let input_files_for_thread = input_files.clone();
     let output_dir_for_thread = output_dir.to_string();
@@ -189,12 +195,16 @@ fn main() {
     for result in rx {
         score_bar.inc(1);
         let result = visualize_result(result, output_dir, visualizer_dir, &tools_dir, &config);
-        vis_bar.inc(1);
+        if let Some(ref bar) = vis_bar {
+            bar.inc(1);
+        }
         results.push(result);
     }
     let _ = producer.join();
     score_bar.finish_with_message("Scoring done");
-    vis_bar.finish_with_message("Visualizing done");
+    if let Some(ref bar) = vis_bar {
+        bar.finish_with_message("Visualizing done");
+    }
 
     // Sort results by file number
     results.sort_by_key(|r| extract_number(&r.input_file));
